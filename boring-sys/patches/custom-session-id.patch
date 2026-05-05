@@ -1,0 +1,115 @@
+warning: in the working copy of 'include/openssl/ssl.h', LF will be replaced by CRLF the next time Git touches it
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index ff68ba69e..811b5d392 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2229,6 +2229,13 @@ OPENSSL_EXPORT int SSL_CTX_set_session_id_context(SSL_CTX *ctx,
+ OPENSSL_EXPORT int SSL_set_session_id_context(SSL *ssl, const uint8_t *sid_ctx,
+                                               size_t sid_ctx_len);
+ 
++// SSL_set_client_hello_session_id sets a custom session ID to be sent in the
++// ClientHello. This overrides the randomly generated session ID used in
++// TLS 1.3 compatibility mode. |id| may be up to SSL_MAX_SSL_SESSION_ID_LENGTH
++// bytes. Pass NULL and 0 to clear any previously set custom ID.
++OPENSSL_EXPORT void SSL_set_client_hello_session_id(SSL *ssl, const uint8_t *id,
++                                                    size_t id_len);
++
+ // SSL_get0_session_id_context returns a pointer to |ssl|'s session ID context
+ // and sets |*out_len| to its length.  It returns NULL on error.
+ OPENSSL_EXPORT const uint8_t *SSL_get0_session_id_context(const SSL *ssl,
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index c96dedc4d..2a7983de1 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -417,10 +417,14 @@ static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
+     hs->session_id = ssl->session->session_id;
+   } else if (session_type == SSLSessionType::kTicket ||
+              enable_compatibility_mode) {
+-    // TLS 1.2 session tickets require a placeholder value to signal resumption.
+-    hs->session_id.ResizeForOverwrite(SSL_MAX_SSL_SESSION_ID_LENGTH);
+-    if (!RAND_bytes(hs->session_id.data(), hs->session_id.size())) {
+-      return ssl_hs_error;
++    Span<const uint8_t> custom_id;
++    if (ssl_get_client_hello_session_id(ssl, &custom_id)) {
++      hs->session_id.CopyFrom(custom_id);
++    } else {
++      hs->session_id.ResizeForOverwrite(SSL_MAX_SSL_SESSION_ID_LENGTH);
++      if (!RAND_bytes(hs->session_id.data(), hs->session_id.size())) {
++        return ssl_hs_error;
++      }
+     }
+   }
+ 
+diff --git a/ssl/internal.h b/ssl/internal.h
+index a69505b47..a98c6abbb 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -2302,6 +2302,13 @@ const SSL_SESSION *ssl_handshake_session(const SSL_HANDSHAKE *hs);
+ // by |hs|. It releases some memory that is no longer needed.
+ void ssl_done_writing_client_hello(SSL_HANDSHAKE *hs);
+ 
++// ssl_get_client_hello_session_id returns true if a custom ClientHello
++// session ID has been set via |SSL_set_client_hello_session_id|. If so,
++// |*out| is set to point to the custom ID. Otherwise false is returned
++// and the caller should generate a random one.
++bool ssl_get_client_hello_session_id(const SSL *ssl,
++                                     bssl::Span<const uint8_t> *out);
++
+ 
+ // Flags.
+ 
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index f64b103fb..d3c6ebb17 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -1431,6 +1431,50 @@ int SSL_set_session_id_context(SSL *ssl, const uint8_t *sid_ctx,
+   return set_session_id_context(ssl->config->cert.get(), sid_ctx, sid_ctx_len);
+ }
+ 
++struct CustomSessionId {
++  uint8_t data[SSL_MAX_SSL_SESSION_ID_LENGTH];
++  uint8_t len;
++};
++
++static int g_custom_session_id_index = -1;
++
++static void custom_session_id_free(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
++                                   int idx, long argl, void *argp) {
++  delete static_cast<CustomSessionId *>(ptr);
++}
++
++static int get_custom_session_id_index() {
++  if (g_custom_session_id_index < 0) {
++    g_custom_session_id_index = SSL_get_ex_new_index(
++        0, nullptr, nullptr, nullptr, custom_session_id_free);
++  }
++  return g_custom_session_id_index;
++}
++
++void SSL_set_client_hello_session_id(SSL *ssl, const uint8_t *id,
++                                     size_t id_len) {
++  int idx = get_custom_session_id_index();
++  auto *old = static_cast<CustomSessionId *>(SSL_get_ex_data(ssl, idx));
++  delete old;
++  SSL_set_ex_data(ssl, idx, nullptr);
++  if (id == nullptr || id_len == 0) {
++    return;
++  }
++  if (id_len > SSL_MAX_SSL_SESSION_ID_LENGTH) {
++    id_len = SSL_MAX_SSL_SESSION_ID_LENGTH;
++  }
++  auto *d = new CustomSessionId();
++  OPENSSL_memcpy(d->data, id, id_len);
++  d->len = static_cast<uint8_t>(id_len);
++  SSL_set_ex_data(ssl, idx, d);
++}
++
++bool ssl_get_client_hello_session_id(const SSL *ssl, Span<const uint8_t> *out) {
++  int idx = get_custom_session_id_index();
++  auto *d = static_cast<CustomSessionId *>(SSL_get_ex_data(ssl, idx));
++  return d != nullptr && (*out = Span(d->data, d->len), true);
++}
++
+ const uint8_t *SSL_get0_session_id_context(const SSL *ssl, size_t *out_len) {
+   if (!ssl->config) {
+     assert(ssl->config);

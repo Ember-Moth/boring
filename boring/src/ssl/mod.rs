@@ -3572,6 +3572,21 @@ impl SslRef {
         unsafe { cvt(ffi::SSL_set_session(self.as_ptr(), session.as_ptr())) }
     }
 
+    /// Sets a custom session ID to be sent in the ClientHello.
+    ///
+    /// This overrides the randomly generated session ID used in TLS 1.3
+    /// compatibility mode. The custom ID must be at most 32 bytes
+    /// (`SSL_MAX_SSL_SESSION_ID_LENGTH`). Pass an empty slice to clear
+    /// any previously set custom ID.
+    ///
+    /// Must be called before the handshake starts.
+    #[corresponds(SSL_set_client_hello_session_id)]
+    pub fn set_client_hello_session_id(&mut self, id: &[u8]) {
+        unsafe {
+            ffi::SSL_set_client_hello_session_id(self.as_ptr(), id.as_ptr(), id.len());
+        }
+    }
+
     /// Determines if the session provided to `set_session` was successfully reused.
     #[corresponds(SSL_session_reused)]
     #[must_use]

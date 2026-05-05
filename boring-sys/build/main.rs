@@ -464,6 +464,9 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
         run_command(Command::new("git").arg("init").current_dir(src_path))?;
     }
 
+    println!("cargo:warning=applying custom session id patch to boringssl");
+    apply_patch(config, "custom-session-id.patch")?;
+
     println!("cargo:warning=applying post quantum crypto patch to boringssl");
     apply_patch(config, "boring-pq.patch")?;
 
